@@ -7,10 +7,17 @@
 //! La requête est forwardée telle quelle vers `{provider.endpoint}/v1/embeddings`.
 //! La réponse du backend est retournée telle quelle (pass-through JSON).
 //!
+//! Alpha.3 :
+//! - Clé API lue depuis `resolved_api_keys` (pré-résolue au startup, FINDING-M4)
+//! - Circuit breaker : 503 si circuit ouvert, record_failure/success autour de l'appel
+//! - Rate limit par IP : 429 si quota dépassé
+//!
 //! Codes d'erreur :
 //! - 400 : alias inconnu (modèle non configuré)
+//! - 429 : rate limit dépassé
 //! - 500 : provider absent de config (incohérence — normalement catchée à la validation)
 //! - 502 : erreur backend (timeout, réseau, upstream 5xx)
+//! - 503 : circuit breaker ouvert (provider temporairement indisponible)
 //! - 4xx passthrough : erreurs client depuis le backend
 
 use std::time::{Duration, Instant};
@@ -25,7 +32,7 @@ use axum::{
 use llm_commons::openai::embeddings::EmbeddingRequest;
 use tracing::instrument;
 
-use crate::{error::ApiError, registry::RequestLogEntry, AppState};
+use crate::{error::ApiError, rate_limit::extract_client_ip, registry::RequestLogEntry, AppState};
 
 /// Handler POST /v1/embeddings
 ///
@@ -33,11 +40,30 @@ use crate::{error::ApiError, registry::RequestLogEntry, AppState};
 /// la réponse JSON du backend sans transformation.
 ///
 /// `model` est obligatoire dans la requête — l'alias est la seule clé de dispatch.
-#[instrument(skip(state, body), fields(model))]
+#[instrument(skip(state, headers, body), fields(model))]
 pub async fn handler(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<EmbeddingRequest>,
 ) -> Result<Response, ApiError> {
+    // Rate limit par IP — extrait depuis X-Forwarded-For / X-Real-IP ou fallback localhost.
+    let client_ip = extract_client_ip(&headers);
+
+    if !state.rate_limiter.check_and_increment(client_ip) {
+        // RL-1 : valeur statique 60s — cohérence avec chat.rs:56.
+        return Ok(Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("Retry-After", "60")
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )
+            .body(Body::from(
+                r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error","code":"too_many_requests"}}"#,
+            ))
+            .unwrap_or_else(|_| StatusCode::TOO_MANY_REQUESTS.into_response()));
+    }
+
     // Extraire le model alias avant de consommer body.
     let model_alias_owned: String = body.model.clone().unwrap_or_default();
     let model = model_alias_owned.as_str();
@@ -60,6 +86,29 @@ pub async fn handler(
         .ok_or_else(|| ApiError::ProviderNotFound(alias.provider.clone()))?
         .clone();
 
+    // Circuit breaker : 503 si circuit ouvert pour ce provider.
+    if !state
+        .providers
+        .circuit_breakers
+        .should_allow(&alias.provider)
+    {
+        tracing::warn!(
+            provider = %alias.provider,
+            "circuit breaker ouvert — requête embeddings rejetée"
+        );
+        return Ok(Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )
+            .body(Body::from(format!(
+                r#"{{"error":{{"message":"provider '{}' temporairement indisponible (circuit ouvert)","type":"server_error","code":"provider_unavailable"}}}}"#,
+                alias.provider
+            )))
+            .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response()));
+    }
+
     let embed_url = format!(
         "{}/v1/embeddings",
         provider_cfg.endpoint.trim_end_matches('/')
@@ -74,29 +123,57 @@ pub async fn handler(
 
     let start = Instant::now();
 
-    // Résolution clé API si configurée.
+    // Clé API pré-résolue depuis resolved_api_keys (FINDING-M4 — pas d'env::var() par requête).
     let mut req = client.post(&embed_url).json(&forward_body);
-    if let Some(env_name) = &provider_cfg.api_key_env {
-        if let Ok(key) = std::env::var(env_name) {
-            req = req.bearer_auth(key);
-        }
+    if let Some(Some(key)) = state.providers.resolved_api_keys.get(&alias.provider) {
+        req = req.bearer_auth(key);
     }
 
-    let response = req.send().await.map_err(|e| {
-        if e.is_timeout() {
-            ApiError::Backend(llm_commons::error::LlmError::Timeout {
-                elapsed_secs: provider_cfg.timeout_secs as f64,
-            })
-        } else {
-            ApiError::Backend(llm_commons::error::LlmError::Network {
-                source: Box::new(e),
-            })
-        }
-    })?;
+    // TMO-1 : override du timeout per-provider — le client partagé a un timeout global,
+    // mais chaque requête peut avoir son propre timeout depuis provider_cfg.timeout_secs.
+    let response = req
+        .timeout(Duration::from_secs(provider_cfg.timeout_secs))
+        .send()
+        .await
+        .map_err(|e| {
+            // Enregistrer l'échec réseau dans le circuit breaker avant de retourner l'erreur.
+            let llm_err = if e.is_timeout() {
+                llm_commons::error::LlmError::Timeout {
+                    elapsed_secs: provider_cfg.timeout_secs as f64,
+                }
+            } else {
+                llm_commons::error::LlmError::Network {
+                    source: Box::new(e),
+                }
+            };
+            state
+                .providers
+                .circuit_breakers
+                .record_failure(&alias.provider, &llm_err);
+            ApiError::Backend(llm_err)
+        })?;
 
     let latency = start.elapsed();
     let status = response.status();
     let status_code = status.as_u16();
+
+    // Enregistrement circuit breaker selon le statut HTTP.
+    if status.is_server_error() {
+        // 5xx backend → failure circuit breaker.
+        state.providers.circuit_breakers.record_failure(
+            &alias.provider,
+            &llm_commons::error::LlmError::UpstreamError {
+                status: status_code,
+                message: format!("upstream HTTP {}", status_code),
+            },
+        );
+    } else {
+        // Succès ou 4xx (erreur client, pas du provider) → success circuit breaker.
+        state
+            .providers
+            .circuit_breakers
+            .record_success(&alias.provider);
+    }
 
     // Journalisation asynchrone non-bloquante — fire and forget.
     // Les erreurs de log ne doivent pas impacter la réponse au client.
@@ -174,14 +251,5 @@ pub async fn handler(
         .into_response())
 }
 
-/// Timeout pour les requêtes d'embedding (valeur si non spécifiée dans config).
-///
-/// Les embeddings sont plus rapides que les completions — 60s est généreux.
-pub const DEFAULT_EMBED_TIMEOUT_SECS: u64 = 60;
-
-impl AppState {
-    /// Expose les dimensions pour le handler embeddings.
-    pub fn embed_timeout(&self) -> Duration {
-        Duration::from_secs(DEFAULT_EMBED_TIMEOUT_SECS)
-    }
-}
+// DT-1 : DEFAULT_EMBED_TIMEOUT_SECS et embed_timeout() supprimés — dead code confirmé.
+// Le timeout per-provider est appliqué directement via provider_cfg.timeout_secs (TMO-1).

@@ -4,6 +4,24 @@ listen = "127.0.0.1:8435"
 # Défaut si absent : "./registry.db" (relatif au répertoire de travail).
 registry_db = "./registry.db"
 
+# Auth Bearer inbound (FINDING-C1).
+# Si présent : lire la valeur de GATEWAY_BEARER_TOKEN et l'exiger sur tous les endpoints
+# sauf /health (toujours public pour le monitoring).
+# Si absent : aucune auth requise (mode local — ne pas exposer publiquement dans ce cas).
+bearer_token_env = "GATEWAY_BEARER_TOKEN"
+
+# Rate limit par IP sur les endpoints POST (chat, embeddings).
+# 0 = désactivé. Défaut : 60 req/min.
+rate_limit_per_minute = 60
+
+# Circuit breaker par provider.
+# circuit_threshold : nombre d'échecs consécutifs avant ouverture (défaut : 5).
+# circuit_window_secs : fenêtre temporelle des échecs en secondes (défaut : 60).
+# circuit_cooldown_secs : durée du cooldown après ouverture en secondes (défaut : 30).
+circuit_threshold = 5
+circuit_window_secs = 60
+circuit_cooldown_secs = 30
+
 [logging]
 level = "info"
 

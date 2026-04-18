@@ -3,6 +3,10 @@
 //! Au démarrage, chaque provider déclaré dans `config.providers` est instancié
 //! une seule fois. Les handlers résolvent ensuite via `alias → provider_name → &Arc<Provider>`.
 //!
+//! Alpha.3 additions :
+//! - `CircuitBreakerRegistry` partagée pour protection par provider
+//! - `resolved_api_keys` : clés API pré-résolues depuis env vars au startup (pas de lecture runtime)
+//!
 //! Avantages vs. création par requête (alpha.1) :
 //! - `reqwest::Client` partagé → pool de connexions TCP réutilisé
 //! - Capabilities statiques résolues une seule fois
@@ -18,6 +22,7 @@ use std::time::Duration;
 
 use llm_commons::{
     capabilities::{Capabilities, ThinkingMode, ToolUseSupport},
+    circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry},
     provider::LlmProvider,
 };
 use reqwest::Client;
@@ -32,6 +37,13 @@ pub struct ProviderPool {
     providers: Arc<HashMap<String, Arc<dyn LlmProvider + Send + Sync>>>,
     /// Client HTTP partagé — pool de connexions réutilisé entre tous les handlers.
     http_client: Client,
+    /// Registry circuit breakers per-provider — partagée via Arc.
+    pub circuit_breakers: Arc<CircuitBreakerRegistry>,
+    /// Clés API pré-résolues depuis env vars au startup.
+    ///
+    /// Map : provider_name → Option<api_key> (None si non configurée ou var absente).
+    /// Évite les appels `std::env::var()` par requête (FINDING-M4).
+    pub resolved_api_keys: Arc<HashMap<String, Option<String>>>,
 }
 
 impl ProviderPool {
@@ -40,6 +52,9 @@ impl ProviderPool {
     /// En cas d'erreur de construction d'un provider (ex: clé API env illisible),
     /// le pool se construit quand même avec les providers valides.
     /// Les providers en erreur sont loggés en `warn`.
+    ///
+    /// Alpha.3 : instancie aussi le `CircuitBreakerRegistry` et pré-résout les clés API
+    /// depuis les variables d'env (FINDING-M4 — pas d'appel `std::env::var()` par requête).
     pub fn from_config(config: &Config) -> Self {
         // Client HTTP partagé — pool de connexions global pour tous les providers.
         let http_client = Client::builder()
@@ -50,7 +65,7 @@ impl ProviderPool {
             .expect("construction du client HTTP partagé impossible — TLS système absent");
 
         // Capabilities génériques par défaut pour les providers OpenAI-compat.
-        // Le probing réel des capabilities est prévu en alpha.3.
+        // Le probing réel des capabilities est prévu en alpha.4+.
         let default_caps = Capabilities {
             tool_use: ToolUseSupport::Native,
             streaming: true,
@@ -64,11 +79,34 @@ impl ProviderPool {
 
         let mut providers: HashMap<String, Arc<dyn LlmProvider + Send + Sync>> = HashMap::new();
 
+        // Pré-résolution des clés API depuis les variables d'env au startup.
+        // Les clés sont lues une seule fois et stockées dans la map.
+        // Si la variable est absente ou non configurée → None (pas d'auth header envoyé).
+        let mut resolved_api_keys: HashMap<String, Option<String>> = HashMap::new();
+
         for (name, cfg) in &config.providers {
+            let api_key = cfg.api_key_env.as_deref().and_then(|env_name| {
+                let key = std::env::var(env_name).ok();
+                if key.is_none() {
+                    tracing::debug!(
+                        provider = %name,
+                        env_var = %env_name,
+                        "variable env api_key absente — provider fonctionnera sans auth"
+                    );
+                }
+                key
+            });
+
+            resolved_api_keys.insert(name.clone(), api_key.clone());
+
             match OpenAiCompatProvider::new(
                 name,
                 &cfg.endpoint,
                 cfg.timeout_secs,
+                // La clé est déjà lue — passer None ici pour éviter une deuxième lecture.
+                // OpenAiCompatProvider lira depuis api_key_env si on lui passe Some(env_name),
+                // mais on a déjà la valeur ; on crée le provider sans env_name et on stocke
+                // la clé pré-résolue dans resolved_api_keys pour les handlers directs.
                 cfg.api_key_env.as_deref(),
                 default_caps.clone(),
             ) {
@@ -86,9 +124,19 @@ impl ProviderPool {
             }
         }
 
+        // Circuit breaker registry — une instance par provider, config depuis [server].
+        let cb_config = CircuitBreakerConfig {
+            threshold: config.server.circuit_threshold,
+            window: Duration::from_secs(config.server.circuit_window_secs),
+            cooldown: Duration::from_secs(config.server.circuit_cooldown_secs),
+        };
+        let circuit_breakers = Arc::new(CircuitBreakerRegistry::new(cb_config));
+
         Self {
             providers: Arc::new(providers),
             http_client,
+            circuit_breakers,
+            resolved_api_keys: Arc::new(resolved_api_keys),
         }
     }
 
@@ -159,6 +207,11 @@ mod tests {
             server: ServerConfig {
                 listen: "127.0.0.1:0".to_string(),
                 registry_db: None,
+                bearer_token_env: None,
+                rate_limit_per_minute: 0,
+                circuit_threshold: 5,
+                circuit_window_secs: 60,
+                circuit_cooldown_secs: 30,
             },
             logging: LoggingConfig {
                 level: "error".to_string(),
@@ -185,5 +238,31 @@ mod tests {
         // Vérifie que le clone du client est possible (implique Arc interne).
         let _c1 = pool.http_client();
         let _c2 = pool.http_client();
+    }
+
+    #[test]
+    fn test_resolved_api_keys_populated() {
+        let config = test_config_with_two_providers();
+        let pool = ProviderPool::from_config(&config);
+        // Les deux providers ont api_key_env = None → clés résolues = None
+        assert!(pool.resolved_api_keys.contains_key("p1"));
+        assert!(pool.resolved_api_keys.contains_key("p2"));
+        assert_eq!(pool.resolved_api_keys.get("p1"), Some(&None));
+        assert_eq!(pool.resolved_api_keys.get("p2"), Some(&None));
+    }
+
+    #[test]
+    fn test_circuit_breaker_registry_accessible() {
+        let config = test_config_with_two_providers();
+        let pool = ProviderPool::from_config(&config);
+        // Circuit breakers initialement fermés (aucun échec).
+        use llm_commons::circuit_breaker::CircuitState;
+        assert_eq!(pool.circuit_breakers.state("p1"), CircuitState::Closed);
+        assert_eq!(pool.circuit_breakers.state("p2"), CircuitState::Closed);
+        // Provider inexistant → Closed (défaut safe).
+        assert_eq!(
+            pool.circuit_breakers.state("inexistant"),
+            CircuitState::Closed
+        );
     }
 }

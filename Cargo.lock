@@ -324,7 +324,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -941,9 +941,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llm-commons"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 source = "sparse+http://192.168.10.99:8450/api/v1/crates/"
-checksum = "8397a4c2a7b8dc2a1471ecbc6ec809be5388fbd253c1d552c8722d2bdef110d9"
+checksum = "016ad3c40384a09dbc8bddc426b881a2f9492778dc11d3b821cc6ea0b2528977"
 dependencies = [
  "async-trait",
  "axum",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "llm-free-gateway-v2"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -970,6 +970,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -1447,7 +1448,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1735,7 +1736,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

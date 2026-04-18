@@ -40,6 +40,48 @@ pub struct ServerConfig {
     /// Peut être ":memory:" pour les tests.
     #[serde(default)]
     pub registry_db: Option<String>,
+    /// Nom de la variable d'environnement contenant le Bearer token inbound.
+    ///
+    /// Si absent ou `None` : aucune authentification requise (mode local/test).
+    /// Si présent : tous les endpoints sauf `/health` exigent `Authorization: Bearer <token>`.
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
+    /// Limite de requêtes par minute par IP (sur les endpoints POST uniquement).
+    ///
+    /// Défaut : 60 req/min. `0` désactive le rate limiting.
+    #[serde(default = "default_rate_limit")]
+    pub rate_limit_per_minute: u32,
+    /// Nombre d'échecs consécutifs avant d'ouvrir le circuit breaker par provider.
+    ///
+    /// Défaut : 5.
+    #[serde(default = "default_circuit_threshold")]
+    pub circuit_threshold: u32,
+    /// Fenêtre temporelle des échecs circuit breaker (secondes).
+    ///
+    /// Défaut : 60s.
+    #[serde(default = "default_circuit_window_secs")]
+    pub circuit_window_secs: u64,
+    /// Durée du cooldown circuit breaker après ouverture (secondes).
+    ///
+    /// Défaut : 30s.
+    #[serde(default = "default_circuit_cooldown_secs")]
+    pub circuit_cooldown_secs: u64,
+}
+
+fn default_rate_limit() -> u32 {
+    60
+}
+
+fn default_circuit_threshold() -> u32 {
+    5
+}
+
+fn default_circuit_window_secs() -> u64 {
+    60
+}
+
+fn default_circuit_cooldown_secs() -> u64 {
+    30
 }
 
 /// Config logging.
