@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+.env
+*.key
+config.toml
