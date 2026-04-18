@@ -36,6 +36,10 @@ pub struct Config {
 pub struct ServerConfig {
     /// Adresse d'écoute (ex: "127.0.0.1:8435").
     pub listen: String,
+    /// Chemin du fichier SQLite pour le registre (défaut: "./registry.db").
+    /// Peut être ":memory:" pour les tests.
+    #[serde(default)]
+    pub registry_db: Option<String>,
 }
 
 /// Config logging.

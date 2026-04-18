@@ -1,5 +1,8 @@
 [server]
 listen = "127.0.0.1:8435"
+# Chemin du registre SQLite (journalisation + statuts providers).
+# Défaut si absent : "./registry.db" (relatif au répertoire de travail).
+registry_db = "./registry.db"
 
 [logging]
 level = "info"
@@ -10,8 +13,17 @@ endpoint = "http://192.168.10.118:8080"
 timeout_secs = 120
 # api_key_env = "LLMCORE_API_KEY"  # optionnel, pas requis pour llmcore local
 
+# Provider embedding — bge-m3 sur llmcore GPU port 8432.
+[providers.llmcore-embed]
+endpoint = "http://192.168.10.118:8432"
+timeout_secs = 60
+
 # Aliases — map model_id demandé → provider + model réel.
-# Requête client : model = "qwen3.5-122b" → route vers llmcore avec model "qwen3.5-122b".
+# Le routing est uniforme pour chat et embeddings : alias = seule clé de dispatch.
 [aliases]
+# Chat completions
 "qwen3.5-122b" = { provider = "llmcore", model = "qwen3.5-122b" }
 "default" = { provider = "llmcore", model = "qwen3.5-122b" }
+
+# Embeddings
+"bge-m3" = { provider = "llmcore-embed", model = "bge-m3" }

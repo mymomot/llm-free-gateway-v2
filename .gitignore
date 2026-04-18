@@ -4,3 +4,9 @@ Cargo.lock.bak
 .env
 *.key
 config.toml
+
+# Runtime registry SQLite
+registry.db
+registry.db-shm
+registry.db-wal
+*.db-journal

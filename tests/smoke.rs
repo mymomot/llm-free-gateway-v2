@@ -1,11 +1,10 @@
-//! Tests smoke — gateway v2 alpha.1.
+//! Tests smoke — gateway v2 alpha.2.
 //!
 //! Ces tests vérifient que le serveur démarre et répond correctement
 //! sans appels réels vers un backend LLM.
 //!
 //! Stratégie : port aléatoire + config temporaire en mémoire.
-
-use std::sync::Arc;
+//! `AppState::for_test()` utilise un registre SQLite :memory: — pas de fichier disque.
 
 use axum_test::TestServer;
 use llm_free_gateway_v2::{build_router, AppState};
@@ -39,6 +38,7 @@ fn test_config() -> llm_free_gateway_v2::config::Config {
     Config {
         server: ServerConfig {
             listen: "127.0.0.1:0".to_string(),
+            registry_db: None,
         },
         logging: LoggingConfig {
             level: "error".to_string(),
@@ -50,12 +50,14 @@ fn test_config() -> llm_free_gateway_v2::config::Config {
 
 /// Construit un `TestServer` axum-test avec la config de test.
 fn build_test_server() -> TestServer {
-    let state = AppState {
-        config: Arc::new(test_config()),
-    };
+    let state = AppState::for_test(test_config());
     let router = build_router(state);
     TestServer::new(router)
 }
+
+// ---------------------------------------------------------------------------
+// Tests health
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_health_returns_200() {
@@ -82,10 +84,10 @@ async fn test_health_body_version_present() {
         body["version"].is_string(),
         "champ 'version' doit être présent et string"
     );
-    // Vérifie que la version contient "alpha.1"
+    // Vérifie que la version contient "alpha.2"
     assert!(
-        body["version"].as_str().unwrap_or("").contains("alpha.1"),
-        "version doit contenir 'alpha.1'"
+        body["version"].as_str().unwrap_or("").contains("alpha.2"),
+        "version doit contenir 'alpha.2'"
     );
 }
 
@@ -104,6 +106,10 @@ async fn test_health_body_providers_list() {
     );
     assert_eq!(providers[0], "test-backend");
 }
+
+// ---------------------------------------------------------------------------
+// Tests chat
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_chat_unknown_model_returns_400() {
@@ -155,4 +161,116 @@ async fn test_chat_unknown_model_error_format() {
         body["error"]["code"].is_string(),
         "'error.code' doit être string"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests models
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_models_returns_200() {
+    let server = build_test_server();
+    let response = server.get("/v1/models").await;
+    response.assert_status_ok();
+}
+
+#[tokio::test]
+async fn test_models_body_format_openai_compat() {
+    let server = build_test_server();
+    let response = server.get("/v1/models").await;
+    let body: serde_json::Value = response.json();
+
+    assert_eq!(body["object"], "list", "champ 'object' doit être 'list'");
+    let data = body["data"]
+        .as_array()
+        .expect("'data' doit être un tableau");
+    assert_eq!(data.len(), 1, "un alias configuré dans la config de test");
+
+    let model = &data[0];
+    assert_eq!(
+        model["id"], "test-model",
+        "id doit être l'alias 'test-model'"
+    );
+    assert_eq!(model["object"], "model", "objet doit être 'model'");
+    assert_eq!(
+        model["owned_by"], "test-backend",
+        "owned_by doit être le provider"
+    );
+    assert!(
+        model["created"].is_number(),
+        "'created' doit être un nombre"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests metrics
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_metrics_returns_200() {
+    let server = build_test_server();
+    let response = server.get("/metrics").await;
+    response.assert_status_ok();
+}
+
+#[tokio::test]
+async fn test_metrics_contains_type_counter() {
+    let server = build_test_server();
+    let response = server.get("/metrics").await;
+    let body = response.text();
+    assert!(
+        body.contains("# TYPE gateway_requests_total counter"),
+        "ligne TYPE counter attendue dans:\n{}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_metrics_contains_providers_configured() {
+    let server = build_test_server();
+    let response = server.get("/metrics").await;
+    let body = response.text();
+    assert!(
+        body.contains("gateway_providers_configured"),
+        "gauge providers_configured attendue dans:\n{}",
+        body
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests embeddings
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_embeddings_unknown_model_returns_400() {
+    let server = build_test_server();
+    let response = server
+        .post("/v1/embeddings")
+        .json(&serde_json::json!({
+            "model": "unknown-embed-model",
+            "input": "hello world"
+        }))
+        .await;
+    response.assert_status_bad_request();
+    let body: serde_json::Value = response.json();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("unknown-embed-model"),
+        "message d'erreur doit mentionner le modèle inconnu"
+    );
+}
+
+#[tokio::test]
+async fn test_embeddings_missing_model_returns_400() {
+    // model non fourni → None → alias "" → inconnu → 400
+    let server = build_test_server();
+    let response = server
+        .post("/v1/embeddings")
+        .json(&serde_json::json!({
+            "input": "hello world"
+        }))
+        .await;
+    response.assert_status_bad_request();
 }

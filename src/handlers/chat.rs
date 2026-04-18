@@ -3,6 +3,9 @@
 //! Dispatch basé sur la table d'aliases de config :
 //! model demandé → lookup aliases → provider_name + real_model → forward HTTP.
 //!
+//! Alpha.2 : le provider est résolu depuis le pool partagé (`AppState.providers`)
+//! sans recréation par requête. Le `reqwest::Client` est aussi partagé.
+//!
 //! Modes :
 //! - `stream: true`  → réponse SSE passthrough (Content-Type: text/event-stream)
 //! - `stream: false` → réponse JSON (Content-Type: application/json)
@@ -13,6 +16,8 @@
 //! - 502 : erreur backend (timeout, réseau, upstream 5xx)
 //! - 4xx passthrough : erreurs client renvoyées depuis le backend
 
+use std::time::Instant;
+
 use axum::{
     body::Body,
     extract::State,
@@ -20,20 +25,15 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use llm_commons::{
-    capabilities::{Capabilities, ThinkingMode, ToolUseSupport},
-    openai::chat::ChatCompletionRequest,
-    provider::LlmProvider,
-};
+use llm_commons::openai::chat::ChatCompletionRequest;
 use tracing::instrument;
 
-use crate::{error::ApiError, providers::openai_compat::OpenAiCompatProvider, AppState};
+use crate::{error::ApiError, registry::RequestLogEntry, AppState};
 
 /// Handler POST /v1/chat/completions
 ///
-/// Lit le body JSON, résout l'alias model, construit le provider à la demande
-/// (sans état partagé entre requêtes pour alpha.1 — pool de providers en alpha.2),
-/// et dispatch vers complete() ou stream() selon le flag `stream`.
+/// Résout l'alias model depuis le pool de providers partagé (construit au startup),
+/// et dispatch vers `complete()` ou `stream()` selon le flag `stream`.
 #[instrument(skip(state, body), fields(model))]
 pub async fn handler(
     State(state): State<AppState>,
@@ -50,48 +50,21 @@ pub async fn handler(
         .ok_or_else(|| ApiError::UnknownModel(body.model.clone()))?
         .clone();
 
-    // Récupération du provider config.
-    let provider_cfg = state
-        .config
+    // Résolution du provider depuis le pool partagé (pas de création par requête).
+    let provider = state
         .providers
         .get(&alias.provider)
-        .ok_or_else(|| ApiError::ProviderNotFound(alias.provider.clone()))?
-        .clone();
-
-    // Construction du provider (stateless pour alpha.1).
-    // La capabilities est générique maximale — le backend n'est pas interrogé
-    // à ce stade pour ses capabilities réelles (probing en alpha.2).
-    let caps = Capabilities {
-        tool_use: ToolUseSupport::Native,
-        streaming: true,
-        vision: true,
-        thinking: ThinkingMode::Switchable,
-        context_max: 131_072,
-        structured_output: false,
-        prompt_caching: true,
-        reasoning_levels: None,
-    };
-
-    let provider = OpenAiCompatProvider::new(
-        &alias.provider,
-        &provider_cfg.endpoint,
-        provider_cfg.timeout_secs,
-        provider_cfg.api_key_env.as_deref(),
-        caps,
-    )
-    .map_err(|e| {
-        ApiError::Backend(llm_commons::error::LlmError::Custom {
-            message: e.to_string(),
-        })
-    })?;
+        .ok_or_else(|| ApiError::ProviderNotFound(alias.provider.clone()))?;
 
     // Adapter la requête : remplacer le model par le model réel du provider.
+    let model_alias = body.model.clone();
     let mut request = body;
     request.model = alias.model.clone();
 
     let is_stream = request.stream == Some(true);
+    let start = Instant::now();
 
-    if is_stream {
+    let result: Result<Response, ApiError> = if is_stream {
         // Mode streaming : forward SSE passthrough.
         let chunk_stream = provider.stream(request).await?;
 
@@ -118,7 +91,49 @@ pub async fn handler(
         // Mode non-streaming : réponse JSON complète.
         let completion = provider.complete(request).await?;
         Ok((StatusCode::OK, Json(completion)).into_response())
-    }
+    };
+
+    let latency = start.elapsed();
+
+    // Journalisation et métriques — non-bloquants, fire and forget.
+    let status_code = match &result {
+        Ok(resp) => resp.status().as_u16(),
+        Err(e) => e.status_code(),
+    };
+
+    // Métriques synchrones (atomiques, pas de I/O).
+    state.metrics.record_request(
+        "/v1/chat/completions",
+        &model_alias,
+        &alias.provider,
+        status_code,
+        Some(latency),
+    );
+
+    // Journal asynchrone SQLite — fire and forget.
+    let registry = state.registry.clone();
+    let alias_name = model_alias.clone();
+    let provider_name = alias.provider.clone();
+    let real_model = alias.model.clone();
+    let error_msg = result.as_ref().err().map(|e| e.to_string());
+
+    tokio::spawn(async move {
+        let entry = RequestLogEntry {
+            model_alias: alias_name,
+            provider_real: provider_name,
+            real_model,
+            route: "/v1/chat/completions".to_owned(),
+            latency_ms: Some(latency.as_millis() as u64),
+            status_code,
+            streamed: is_stream,
+            error_message: error_msg,
+        };
+        if let Err(e) = registry.log_request(entry).await {
+            tracing::warn!("erreur journalisation requête chat: {}", e);
+        }
+    });
+
+    result
 }
 
 /// Convertit un stream de `LlmResult<ChatCompletionChunk>` en stream de bytes SSE.

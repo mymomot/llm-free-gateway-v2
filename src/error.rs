@@ -53,6 +53,32 @@ struct ErrorDetail {
     code: &'static str,
 }
 
+impl ApiError {
+    /// Retourne le code HTTP correspondant à l'erreur.
+    ///
+    /// Utilisé par les handlers pour journaliser le status_code avant de consommer
+    /// l'erreur via `into_response()`.
+    pub fn status_code(&self) -> u16 {
+        match self {
+            ApiError::UnknownModel(_) => 400,
+            ApiError::ProviderNotFound(_) => 500,
+            ApiError::InvalidBody(_) => 400,
+            ApiError::Backend(llm_err) => match llm_err {
+                LlmError::InvalidRequest { .. } => 400,
+                LlmError::Unauthorized { .. } => 401,
+                LlmError::Forbidden { .. } => 403,
+                LlmError::NotFound { .. } => 404,
+                LlmError::RateLimited { .. } => 429,
+                LlmError::Timeout { .. }
+                | LlmError::Network { .. }
+                | LlmError::ProviderUnavailable { .. }
+                | LlmError::UpstreamError { .. } => 502,
+                _ => 500,
+            },
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, error_type, code, message) = match &self {

@@ -2,8 +2,11 @@
 //!
 //! Démarre un serveur Axum sur le port configuré (default: 127.0.0.1:8435).
 //! Routes :
-//! - `GET /health` → status + providers
+//! - `GET /health`               → status + providers
+//! - `GET /metrics`              → export Prometheus text format
+//! - `GET /v1/models`            → liste des aliases configurés
 //! - `POST /v1/chat/completions` → proxy vers backend OpenAI-compat
+//! - `POST /v1/embeddings`       → proxy embedding vers backend OpenAI-compat
 //!
 //! Configuration :
 //! - `--config PATH` (argument CLI)
@@ -12,6 +15,9 @@
 //!
 //! Conformité ADR-019 (Monarch) : service parallèle v2 sur port 8435,
 //! sans impact sur gateway v1 port 8430.
+
+use std::path::Path;
+use std::time::Duration;
 
 use llm_free_gateway_v2::config::Config;
 use llm_free_gateway_v2::{build_router, AppState};
@@ -38,7 +44,36 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let listen_addr = config.server.listen.clone();
-    let state = AppState::new(config);
+
+    // Chemin du registre SQLite : depuis config ou défaut relatif à la config.
+    let registry_path = config
+        .server
+        .registry_db
+        .as_deref()
+        .map(|p| Path::new(p).to_owned());
+
+    let state = AppState::new(config, registry_path.as_deref());
+
+    // Background task : purge TTL des statuts providers périmés (toutes les 5 min).
+    // Les statuts rate_limited/down non mis à jour depuis 1h sont supprimés.
+    {
+        let registry = state.registry.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                match registry
+                    .purge_stale_statuses(Duration::from_secs(3600))
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(purged = n, "statuts providers périmés purgés"),
+                    Err(e) => tracing::warn!(error = %e, "échec purge statuts providers"),
+                }
+            }
+        });
+    }
+
     let router = build_router(state);
 
     // Bind et démarrage.
