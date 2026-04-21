@@ -1,0 +1,28 @@
+name: CI
+on:
+  push: {branches: [master]}
+  pull_request:
+
+jobs:
+  test:
+    runs-on: [self-hosted, linux, x64, lxc-500]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: llm-free-gateway-v2-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all
+      - run: cargo build --release
+      - name: Upload binary
+        if: github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-free-gateway-v2
+          path: target/release/llm-free-gateway-v2

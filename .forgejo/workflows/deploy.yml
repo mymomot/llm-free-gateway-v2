@@ -1,0 +1,22 @@
+name: Deploy
+on:
+  push: {branches: [master]}
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, x64, lxc-500]
+    needs: []
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release
+        run: cargo build --release
+      - name: Install binary
+        run: sudo install -m 755 target/release/llm-free-gateway-v2 /usr/local/bin/llm-free-gateway-v2
+      - name: Restart service
+        run: sudo systemctl restart llm-free-gateway-v2
+      - name: Smoke test
+        run: |
+          sleep 3
+          curl -sf http://127.0.0.1:8435/health
+          sudo systemctl is-active llm-free-gateway-v2.service
