@@ -120,7 +120,8 @@ pub async fn handler(
         // CB-1 : le circuit breaker est alimenté par les erreurs mid-stream via record_failure.
         let circuit_breakers = state.providers.circuit_breakers.clone();
         let provider_id_for_stream = alias.provider.clone();
-        let sse_body = sse_stream_from_chunks(chunk_stream, circuit_breakers, provider_id_for_stream);
+        let sse_body =
+            sse_stream_from_chunks(chunk_stream, circuit_breakers, provider_id_for_stream);
 
         let response = Response::builder()
             .status(StatusCode::OK)

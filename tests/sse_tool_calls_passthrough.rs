@@ -134,9 +134,7 @@ async fn spawn_mock_llmcore() -> SocketAddr {
         .await
         .expect("bind port aléatoire mock llmcore");
 
-    let addr = listener
-        .local_addr()
-        .expect("adresse locale mock llmcore");
+    let addr = listener.local_addr().expect("adresse locale mock llmcore");
 
     tokio::spawn(async move {
         axum::serve(listener, app)
