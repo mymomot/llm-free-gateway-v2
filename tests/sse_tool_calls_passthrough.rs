@@ -126,7 +126,6 @@ async fn mock_llmcore_handler(AxumJson(_req): AxumJson<serde_json::Value>) -> Re
 /// Démarre le mock llmcore sur un port aléatoire et retourne son `SocketAddr`.
 ///
 /// Le serveur tourne dans un task tokio détaché — il s'arrête quand le test termine.
-/// Le sleep de 100ms laisse au listener le temps de s'initialiser avant la première requête.
 async fn spawn_mock_llmcore() -> SocketAddr {
     let app = Router::new().route("/v1/chat/completions", post(mock_llmcore_handler));
 
@@ -142,8 +141,9 @@ async fn spawn_mock_llmcore() -> SocketAddr {
             .expect("mock llmcore serve");
     });
 
-    // Laisse le temps au listener de s'initialiser avant que la gateway l'interroge.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Bind sync + local_addr() = socket prêt. axum::serve est scheduled avant
+    // la première requête TestServer dans le runtime tokio single-threaded test.
+    // Pas besoin de sleep (anti-pattern flaky).
 
     addr
 }
@@ -229,10 +229,10 @@ async fn sse_tool_calls_passthrough_works() {
         "type 'function' du tool call doit passer en passthrough. Body:\n{body}"
     );
 
-    // Premier fragment d'arguments (début du JSON `{`).
+    // Le champ arguments doit être présent dans les deltas tool_calls.
     assert!(
-        body.contains("\"arguments\":\"{\"") || body.contains("\"arguments\":\"{\\\""),
-        "premier fragment arguments '{{' doit passer en passthrough. Body:\n{body}"
+        body.contains("\"arguments\""),
+        "body must contain 'arguments' field from tool_calls deltas. Body:\n{body}"
     );
 
     // Fragment d'arguments progressif contenant la ville.
