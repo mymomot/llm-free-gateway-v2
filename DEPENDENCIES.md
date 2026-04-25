@@ -1,7 +1,7 @@
 # Dépendances — llm-free-gateway-v2
 
 > Généré le : 2026-04-25
-> Commit ref : 4aabb8e
+> Commit ref : c3cc70b
 
 Runtime : **Rust** | Édition : 2021 | Version crate : `0.1.0-alpha.3`
 Registry personnalisé : `kellnr` (Forgejo Kellnr local) pour `llm-commons`.

@@ -1,7 +1,7 @@
 # Architecture — llm-free-gateway-v2
 
 > Généré le : 2026-04-25
-> Commit ref : 98464c9
+> Commit ref : c3cc70b
 
 Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit breaker per-provider, fallback déclaratif par alias TOML, auth Bearer inbound, rate limiting par IP, cap hard tokens (C4), rejet strict HTTP 404 des aliases inconnus (Phase D), journalisation SQLite et export Prometheus.
 
