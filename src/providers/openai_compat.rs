@@ -27,12 +27,15 @@ pub struct OpenAiCompatProvider {
     name: String,
     /// URL du endpoint `/v1/chat/completions` (endpoint_base + "/v1/chat/completions").
     chat_url: String,
-    /// Client HTTP partagé avec timeout configuré.
+    /// Client HTTP partagé avec timeout total configuré (pour `complete()` et `health_check()`).
     client: Client,
     /// Capabilities déclarées — configurées à la construction.
     capabilities: Capabilities,
     /// Clé API optionnelle (lue depuis variable d'env au moment de la construction).
     api_key: Option<String>,
+    /// Timeout en secondes issu de la config — utilisé comme `connect_timeout` pour
+    /// les requêtes streaming (pas de timeout total sur le flux).
+    timeout_secs: u64,
 }
 
 impl OpenAiCompatProvider {
@@ -72,6 +75,7 @@ impl OpenAiCompatProvider {
             client,
             capabilities,
             api_key,
+            timeout_secs,
         })
     }
 
@@ -145,20 +149,27 @@ impl LlmProvider for OpenAiCompatProvider {
         let mut req = request;
         req.stream = Some(true);
 
-        // Timeout connexion uniquement — pas de timeout global sur le flux streaming.
-        let client_no_timeout = Client::builder()
-            .connect_timeout(Duration::from_secs(30))
+        // Client dédié au streaming : uniquement connect_timeout (temps jusqu'au premier byte),
+        // PAS de timeout total. Pour les gros prompts (ex: 17K tokens à 133 tok/s = ~128s de
+        // prompt-processing avant le 1er byte), un timeout total couperait la requête à tort.
+        //
+        // Le connect_timeout utilise self.timeout_secs (config TOML du provider) au lieu de
+        // la valeur 30s hardcodée qui était la cause du bug timeout sur Monarch/BB analyze.
+        let client_stream = Client::builder()
+            .connect_timeout(Duration::from_secs(self.timeout_secs))
             .build()
             .map_err(|e| LlmError::Network {
                 source: Box::new(e),
             })?;
 
-        let builder = client_no_timeout.post(&self.chat_url).json(&req);
+        let builder = client_stream.post(&self.chat_url).json(&req);
         let builder = self.add_auth(builder);
 
         let response = builder.send().await.map_err(|e| {
             if e.is_timeout() {
-                LlmError::Timeout { elapsed_secs: 30.0 }
+                LlmError::Timeout {
+                    elapsed_secs: self.timeout_secs as f64,
+                }
             } else {
                 LlmError::Network {
                     source: Box::new(e),
@@ -278,5 +289,88 @@ impl SerdeErrorCustom for serde_json::Error {
     fn custom(msg: impl std::fmt::Display) -> Self {
         // Seul moyen de construire un serde_json::Error depuis un message arbitraire.
         serde_json::from_str::<serde_json::Value>(&format!("\"{}\"", msg)).unwrap_err()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llm_commons::capabilities::{ThinkingMode, ToolUseSupport};
+
+    fn default_caps() -> Capabilities {
+        Capabilities {
+            tool_use: ToolUseSupport::Native,
+            streaming: true,
+            vision: false,
+            thinking: ThinkingMode::None,
+            context_max: 131_072,
+            structured_output: false,
+            prompt_caching: false,
+            reasoning_levels: None,
+        }
+    }
+
+    /// Vérifie que timeout_secs est correctement stocké dans la struct.
+    ///
+    /// Régression : avant le fix, timeout_secs n'était pas un champ de la struct,
+    /// ce qui empêchait stream() de l'utiliser pour le connect_timeout.
+    #[test]
+    fn timeout_secs_stored_in_struct() {
+        let provider = OpenAiCompatProvider::new(
+            "test-provider",
+            "http://127.0.0.1:9999",
+            600,
+            None,
+            default_caps(),
+        )
+        .expect("construction OpenAiCompatProvider échouée");
+
+        assert_eq!(
+            provider.timeout_secs, 600,
+            "timeout_secs doit être 600 tel que passé à new()"
+        );
+    }
+
+    /// Vérifie que le timeout_secs par défaut (120s) est aussi bien stocké.
+    #[test]
+    fn timeout_secs_default_stored() {
+        let provider = OpenAiCompatProvider::new(
+            "test-default",
+            "http://127.0.0.1:9999",
+            120,
+            None,
+            default_caps(),
+        )
+        .expect("construction OpenAiCompatProvider échouée");
+
+        assert_eq!(
+            provider.timeout_secs, 120,
+            "timeout_secs doit être 120 (valeur défaut config)"
+        );
+    }
+
+    /// Vérifie que des valeurs extrêmes (très grand timeout pour streaming lent) sont acceptées.
+    ///
+    /// Cas réel : prompt 17K tokens à 133 tok/s = ~128s avant 1er byte.
+    /// Un timeout de 600s doit être stocké et utilisable sans troncature.
+    #[test]
+    fn timeout_secs_large_value_stored() {
+        let provider = OpenAiCompatProvider::new(
+            "test-large-timeout",
+            "http://127.0.0.1:9999",
+            600,
+            None,
+            default_caps(),
+        )
+        .expect("construction OpenAiCompatProvider échouée");
+
+        // 600s = 10 minutes — couvre un prompt de ~80K tokens à 133 tok/s
+        assert_eq!(provider.timeout_secs, 600);
+        // Vérifier aussi la conversion f64 sans perte (utilisée dans LlmError::Timeout)
+        assert_eq!(
+            provider.timeout_secs as f64,
+            600.0_f64,
+            "conversion u64→f64 sans perte pour elapsed_secs"
+        );
     }
 }
