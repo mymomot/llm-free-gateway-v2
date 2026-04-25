@@ -115,7 +115,7 @@ async fn test_health_body_providers_list() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_chat_unknown_model_returns_400() {
+async fn test_chat_unknown_model_returns_404() {
     let server = build_test_server();
     let response = server
         .post("/v1/chat/completions")
@@ -124,7 +124,8 @@ async fn test_chat_unknown_model_returns_400() {
             "messages": [{"role": "user", "content": "bonjour"}]
         }))
         .await;
-    response.assert_status_bad_request();
+    // HTTP 404 — alias strict rejeté (fix Phase D 2026-04-25).
+    response.assert_status(axum::http::StatusCode::NOT_FOUND);
     let body: serde_json::Value = response.json();
     assert!(
         body["error"]["message"]
@@ -137,7 +138,7 @@ async fn test_chat_unknown_model_returns_400() {
 
 #[tokio::test]
 async fn test_chat_unknown_model_error_format() {
-    // Vérifie que le format d'erreur est conforme OpenAI-compat.
+    // Vérifie que le format d'erreur est conforme OpenAI-compat (fix Phase D 2026-04-25).
     let server = build_test_server();
     let response = server
         .post("/v1/chat/completions")
@@ -146,6 +147,8 @@ async fn test_chat_unknown_model_error_format() {
             "messages": [{"role": "user", "content": "test"}]
         }))
         .await;
+    // HTTP 404 depuis Phase D (anciennement 400).
+    response.assert_status(axum::http::StatusCode::NOT_FOUND);
     let body: serde_json::Value = response.json();
     // Format OpenAI-compat : { "error": { "message": "...", "type": "...", "code": "..." } }
     assert!(
@@ -245,7 +248,8 @@ async fn test_metrics_contains_providers_configured() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_embeddings_unknown_model_returns_400() {
+async fn test_embeddings_unknown_model_returns_404() {
+    // HTTP 404 — alias strict rejeté (fix Phase D 2026-04-25).
     let server = build_test_server();
     let response = server
         .post("/v1/embeddings")
@@ -254,7 +258,7 @@ async fn test_embeddings_unknown_model_returns_400() {
             "input": "hello world"
         }))
         .await;
-    response.assert_status_bad_request();
+    response.assert_status(axum::http::StatusCode::NOT_FOUND);
     let body: serde_json::Value = response.json();
     assert!(
         body["error"]["message"]
@@ -266,8 +270,8 @@ async fn test_embeddings_unknown_model_returns_400() {
 }
 
 #[tokio::test]
-async fn test_embeddings_missing_model_returns_400() {
-    // model non fourni → None → alias "" → inconnu → 400
+async fn test_embeddings_missing_model_returns_404() {
+    // model non fourni → None → alias "" → inconnu → 404 (fix Phase D 2026-04-25).
     let server = build_test_server();
     let response = server
         .post("/v1/embeddings")
@@ -275,7 +279,7 @@ async fn test_embeddings_missing_model_returns_400() {
             "input": "hello world"
         }))
         .await;
-    response.assert_status_bad_request();
+    response.assert_status(axum::http::StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------

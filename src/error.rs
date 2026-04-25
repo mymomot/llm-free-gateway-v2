@@ -22,9 +22,18 @@ use thiserror::Error;
 /// Erreur retournée par les handlers du gateway.
 #[derive(Debug, Error)]
 pub enum ApiError {
-    /// Modèle inconnu — pas dans la table d'aliases.
-    #[error("unknown model: {0}")]
-    UnknownModel(String),
+    /// Alias inconnu — pas dans la table d'aliases du config TOML.
+    ///
+    /// HTTP 404 — rejet strict : aucun forward silencieux vers un alias par défaut.
+    /// La liste des aliases disponibles est incluse dans le message pour faciliter
+    /// le diagnostic côté consumer.
+    #[error("model alias '{alias}' not found. Available: {}", available.join(", "))]
+    AliasNotFound {
+        /// Alias demandé par le consumer.
+        alias: String,
+        /// Liste triée des aliases configurés dans `[aliases]`.
+        available: Vec<String>,
+    },
 
     /// Provider configuré pour l'alias mais absent de la section `[providers]`.
     #[error("provider '{0}' not found in config")]
@@ -73,7 +82,7 @@ impl ApiError {
     /// l'erreur via `into_response()`.
     pub fn status_code(&self) -> u16 {
         match self {
-            ApiError::UnknownModel(_) => 400,
+            ApiError::AliasNotFound { .. } => 404,
             ApiError::ProviderNotFound(_) => 500,
             ApiError::InvalidBody(_) => 400,
             ApiError::ContextLengthExceeded { .. } => 413,
@@ -96,11 +105,15 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, error_type, code, message) = match &self {
-            ApiError::UnknownModel(m) => (
-                StatusCode::BAD_REQUEST,
+            ApiError::AliasNotFound { alias, available } => (
+                StatusCode::NOT_FOUND,
                 "invalid_request_error",
                 "model_not_found",
-                format!("unknown model: {}", m),
+                format!(
+                    "Model alias '{}' is not configured. Available aliases: {}",
+                    alias,
+                    available.join(", ")
+                ),
             ),
             ApiError::ProviderNotFound(p) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
