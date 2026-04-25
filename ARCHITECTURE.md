@@ -1,9 +1,9 @@
 # Architecture — llm-free-gateway-v2
 
 > Généré le : 2026-04-25
-> Commit ref : 4aabb8e
+> Commit ref : e9f15be
 
-Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit breaker per-provider, fallback déclaratif par alias TOML, auth Bearer inbound, rate limiting par IP, journalisation SQLite et export Prometheus.
+Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit breaker per-provider, fallback déclaratif par alias TOML, auth Bearer inbound, rate limiting par IP, cap hard tokens (C4), journalisation SQLite et export Prometheus.
 
 ---
 
@@ -34,6 +34,9 @@ Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit
   ├── [FEATURE] /v1/models GET → models::handler
   │   └── retourne liste aliases configurés
   ├── [FEATURE] /v1/chat/completions POST → chat::handler
+  │   ├── [HOOK] rate_limit par IP (RateLimiter) — avant dispatch
+  │   ├── [HOOK] token_counter::estimate_total_tokens — cap hard (C4, council MAJOR 2026-04-25)
+  │   │   └── → HTTP 413 ApiError::ContextLengthExceeded si total > max_total_tokens
   │   ├── [SUB] dispatch_with_fallback — résolution alias + try primary + try fallback
   │   │   ├── [SUB] try_provider — CB check + pool.get() + stream ou complete
   │   │   │   ├── vérifie CircuitBreakerRegistry.should_allow(provider)
@@ -41,7 +44,6 @@ Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit
   │   │   │   ├── appelle LlmProvider.stream() ou LlmProvider.complete()
   │   │   │   └── record_failure/record_success sur le CB primary
   │   │   └── [UTILITY] is_backend_error — détecte ApiError::Backend pour trigger fallback
-  │   ├── [HOOK] rate_limit par IP (RateLimiter) — avant dispatch
   │   └── [HOOK] registry.log_request() — journalise provider effectif + latence
   ├── [FEATURE] /v1/embeddings POST → embeddings::handler
   │   └── pass-through HTTP direct via ProviderPool.http_client()
@@ -71,6 +73,7 @@ Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit
 | auth::bearer_auth | dépend de | AppState.bearer_token |
 | embeddings::handler | utilise | ProviderPool.http_client() (reqwest direct) |
 | chat::handler | utilise | RateLimiter (par IP) |
+| chat::handler | utilise | token_counter::estimate_total_tokens (cap C4) |
 | chat::handler | persiste dans | Registry (log_request) |
 | Metrics | utilisé par | /metrics handler |
 | AliasTarget | consommé par | dispatch_with_fallback (résolution alias) |
@@ -94,7 +97,8 @@ Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit
 | Health check | `src/handlers/health.rs` |
 | Liste modèles | `src/handlers/models.rs` |
 | Erreurs | `src/error.rs` |
-| Tests intégration | `tests/smoke.rs`, `tests/fallback_openrouter.rs`, `tests/sse_tool_calls_passthrough.rs`, `tests/sse_conversational_passthrough.rs` |
+| Cap tokens (C4) | `src/token_counter.rs` |
+| Tests intégration | `tests/smoke.rs`, `tests/fallback_openrouter.rs`, `tests/sse_tool_calls_passthrough.rs`, `tests/sse_conversational_passthrough.rs`, `tests/token_cap.rs` |
 
 ---
 
