@@ -1,9 +1,9 @@
 # Architecture — llm-free-gateway-v2
 
 > Généré le : 2026-04-25
-> Commit ref : e9f15be
+> Commit ref : 98464c9
 
-Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit breaker per-provider, fallback déclaratif par alias TOML, auth Bearer inbound, rate limiting par IP, cap hard tokens (C4), journalisation SQLite et export Prometheus.
+Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit breaker per-provider, fallback déclaratif par alias TOML, auth Bearer inbound, rate limiting par IP, cap hard tokens (C4), rejet strict HTTP 404 des aliases inconnus (Phase D), journalisation SQLite et export Prometheus.
 
 ---
 
@@ -37,6 +37,8 @@ Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit
   │   ├── [HOOK] rate_limit par IP (RateLimiter) — avant dispatch
   │   ├── [HOOK] token_counter::estimate_total_tokens — cap hard (C4, council MAJOR 2026-04-25)
   │   │   └── → HTTP 413 ApiError::ContextLengthExceeded si total > max_total_tokens
+  │   ├── [HOOK] alias lookup strict — rejet HTTP 404 si alias absent config TOML (Phase D 2026-04-25)
+  │   │   └── → ApiError::AliasNotFound { alias, available } — aucun fallback "default" silencieux
   │   ├── [SUB] dispatch_with_fallback — résolution alias + try primary + try fallback
   │   │   ├── [SUB] try_provider — CB check + pool.get() + stream ou complete
   │   │   │   ├── vérifie CircuitBreakerRegistry.should_allow(provider)
@@ -46,6 +48,7 @@ Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit
   │   │   └── [UTILITY] is_backend_error — détecte ApiError::Backend pour trigger fallback
   │   └── [HOOK] registry.log_request() — journalise provider effectif + latence
   ├── [FEATURE] /v1/embeddings POST → embeddings::handler
+  │   ├── [HOOK] alias lookup strict — rejet HTTP 404 si alias absent config TOML (Phase D 2026-04-25)
   │   └── pass-through HTTP direct via ProviderPool.http_client()
   ├── [UTILITY] auth::bearer_auth — middleware Bearer inbound (FINDING-C1)
   │   └── bypass automatique pour /health
@@ -98,7 +101,7 @@ Gateway HTTP OpenAI-compatible v2. Proxy unifié avec pool de providers, circuit
 | Liste modèles | `src/handlers/models.rs` |
 | Erreurs | `src/error.rs` |
 | Cap tokens (C4) | `src/token_counter.rs` |
-| Tests intégration | `tests/smoke.rs`, `tests/fallback_openrouter.rs`, `tests/sse_tool_calls_passthrough.rs`, `tests/sse_conversational_passthrough.rs`, `tests/token_cap.rs` |
+| Tests intégration | `tests/smoke.rs`, `tests/fallback_openrouter.rs`, `tests/sse_tool_calls_passthrough.rs`, `tests/sse_conversational_passthrough.rs`, `tests/token_cap.rs`, `tests/alias_strict.rs` |
 
 ---
 
