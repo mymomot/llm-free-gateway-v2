@@ -129,6 +129,47 @@ pub struct AliasTarget {
     pub provider: String,
     /// Identifiant de modèle réel à transmettre au backend.
     pub model: String,
+    /// Provider de fallback (optionnel) — tenté si le provider primary retourne une erreur
+    /// backend (réseau, timeout, 5xx) ou si son circuit breaker est ouvert.
+    ///
+    /// Doit référencer un provider déclaré dans `[providers]`.
+    /// Si absent : aucun fallback, le handler retourne l'erreur directement.
+    #[serde(default)]
+    pub fallback_provider: Option<String>,
+    /// Identifiant de modèle à envoyer au provider de fallback.
+    ///
+    /// Si absent, le même `model` que le primary est utilisé.
+    #[serde(default)]
+    pub fallback_model: Option<String>,
+}
+
+impl AliasTarget {
+    /// Construit un alias simple sans fallback — utile dans les tests.
+    pub fn simple(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            fallback_provider: None,
+            fallback_model: None,
+        }
+    }
+
+    /// Construit un alias avec fallback provider.
+    ///
+    /// `fallback_model` : si `None`, le même `model` que le primary est utilisé.
+    pub fn with_fallback(
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        fallback_provider: impl Into<String>,
+        fallback_model: Option<String>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            fallback_provider: Some(fallback_provider.into()),
+            fallback_model,
+        }
+    }
 }
 
 impl Config {
@@ -148,7 +189,8 @@ impl Config {
 
     /// Valide la cohérence de la config après parsing.
     ///
-    /// Vérifie que chaque alias référence un provider déclaré dans `[providers]`.
+    /// Vérifie que chaque alias référence un provider déclaré dans `[providers]`,
+    /// et que le fallback_provider (si présent) est également déclaré.
     fn validate(&self) -> anyhow::Result<()> {
         for (alias, target) in &self.aliases {
             if !self.providers.contains_key(&target.provider) {
@@ -157,6 +199,15 @@ impl Config {
                     alias,
                     target.provider
                 );
+            }
+            if let Some(fb) = &target.fallback_provider {
+                if !self.providers.contains_key(fb) {
+                    anyhow::bail!(
+                        "alias '{}' référence le fallback_provider '{}' qui n'est pas déclaré dans [providers]",
+                        alias,
+                        fb
+                    );
+                }
             }
         }
         Ok(())

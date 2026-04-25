@@ -36,12 +36,29 @@ timeout_secs = 120
 endpoint = "http://192.168.10.118:8432"
 timeout_secs = 60
 
+# Provider fallback OpenRouter — activé si OPENROUTER_API_KEY est définie.
+# Utilisé comme fallback quand llmcore est inaccessible (réseau, timeout, erreur 5xx).
+# api_key_env : nom de la variable d'env contenant la clé API OpenRouter.
+#   Clé disponible sur https://openrouter.ai/settings/keys
+#   Commande : export OPENROUTER_API_KEY=sk-or-v1-...
+[providers.openrouter]
+endpoint = "https://openrouter.ai/api/v1"
+timeout_secs = 30
+api_key_env = "OPENROUTER_API_KEY"
+
 # Aliases — map model_id demandé → provider + model réel.
+#
+# Champs disponibles :
+#   provider         : nom du provider primary (obligatoire)
+#   model            : identifiant de modèle envoyé au provider (obligatoire)
+#   fallback_provider: provider tenté si le primary échoue (optionnel)
+#   fallback_model   : modèle envoyé au fallback (optionnel, utilise `model` si absent)
+#
 # Le routing est uniforme pour chat et embeddings : alias = seule clé de dispatch.
 [aliases]
-# Chat completions
-"qwen3.5-122b" = { provider = "llmcore", model = "qwen3.5-122b" }
-"default" = { provider = "llmcore", model = "qwen3.5-122b" }
+# Chat completions — avec fallback OpenRouter si llmcore est down.
+"qwen3.5-122b" = { provider = "llmcore", model = "qwen3.5-122b", fallback_provider = "openrouter", fallback_model = "qwen/qwen3-30b-a3b:free" }
+"default" = { provider = "llmcore", model = "qwen3.5-122b", fallback_provider = "openrouter", fallback_model = "qwen/qwen3-30b-a3b:free" }
 
-# Embeddings
+# Embeddings — pas de fallback OR (embedding OR non supporté dans la même chaîne)
 "bge-m3" = { provider = "llmcore-embed", model = "bge-m3" }

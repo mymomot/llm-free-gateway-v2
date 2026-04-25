@@ -29,10 +29,7 @@ fn test_config() -> llm_free_gateway_v2::config::Config {
     let mut aliases = HashMap::new();
     aliases.insert(
         "test-model".to_string(),
-        AliasTarget {
-            provider: "test-backend".to_string(),
-            model: "test-model-real".to_string(),
-        },
+        AliasTarget::simple("test-backend", "test-model-real"),
     );
 
     Config {
@@ -304,10 +301,7 @@ fn build_auth_test_server(token: &str) -> TestServer {
     let mut aliases = HashMap::new();
     aliases.insert(
         "test-model".to_string(),
-        AliasTarget {
-            provider: "test-backend".to_string(),
-            model: "test-model-real".to_string(),
-        },
+        AliasTarget::simple("test-backend", "test-model-real"),
     );
 
     let config = Config {
@@ -408,10 +402,7 @@ fn build_rate_limited_server() -> TestServer {
     let mut aliases = HashMap::new();
     aliases.insert(
         "test-model".to_string(),
-        AliasTarget {
-            provider: "test-backend".to_string(),
-            model: "test-model-real".to_string(),
-        },
+        AliasTarget::simple("test-backend", "test-model-real"),
     );
 
     let config = Config {

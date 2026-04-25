@@ -196,13 +196,7 @@ mod tests {
             },
         );
         let mut aliases = HashMap::new();
-        aliases.insert(
-            "m1".to_string(),
-            AliasTarget {
-                provider: "p1".to_string(),
-                model: "model-real".to_string(),
-            },
-        );
+        aliases.insert("m1".to_string(), AliasTarget::simple("p1", "model-real"));
         Config {
             server: ServerConfig {
                 listen: "127.0.0.1:0".to_string(),

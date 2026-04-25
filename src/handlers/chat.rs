@@ -9,6 +9,13 @@
 //! Alpha.3 : circuit breaker par provider — 503 si circuit ouvert.
 //!           Rate limit par IP — 429 si quota dépassé.
 //!
+//! Alpha.4 : fallback provider par alias — si le primary échoue (erreur backend ou CB ouvert),
+//!           le handler tente le `fallback_provider` configuré dans l'alias.
+//!           Le fallback est transparent : le circuit breaker du primary n'est pas impacté
+//!           par les erreurs récupérées via fallback. Seul le fallback lui-même alimente
+//!           son propre circuit breaker.
+//!           Le streaming utilise le même mécanisme de fallback pre-connect.
+//!
 //! Modes :
 //! - `stream: true`  → réponse SSE passthrough (Content-Type: text/event-stream)
 //! - `stream: false` → réponse JSON (Content-Type: application/json)
@@ -17,8 +24,8 @@
 //! - 400 : model inconnu (pas dans aliases)
 //! - 429 : rate limit dépassé
 //! - 500 : provider absent de config (incohérence — normalement catchée à la validation)
-//! - 502 : erreur backend (timeout, réseau, upstream 5xx)
-//! - 503 : circuit breaker ouvert
+//! - 502 : erreur backend (timeout, réseau, upstream 5xx) — tous fallbacks épuisés
+//! - 503 : circuit breaker ouvert — tous fallbacks épuisés
 //! - 4xx passthrough : erreurs client renvoyées depuis le backend
 
 use std::{sync::Arc, time::Instant};
@@ -75,53 +82,212 @@ pub async fn handler(
         .ok_or_else(|| ApiError::UnknownModel(body.model.clone()))?
         .clone();
 
-    // Circuit breaker : 503 si circuit ouvert pour ce provider.
-    if !state
-        .providers
-        .circuit_breakers
-        .should_allow(&alias.provider)
-    {
-        tracing::warn!(
-            provider = %alias.provider,
-            "circuit breaker ouvert — requête chat rejetée"
-        );
-        return Ok(Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .header(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            )
-            .body(Body::from(format!(
-                r#"{{"error":{{"message":"provider '{}' temporairement indisponible (circuit ouvert)","type":"server_error","code":"provider_unavailable"}}}}"#,
-                alias.provider
-            )))
-            .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response()));
-    }
-
-    // Résolution du provider depuis le pool partagé (pas de création par requête).
-    let provider = state
-        .providers
-        .get(&alias.provider)
-        .ok_or_else(|| ApiError::ProviderNotFound(alias.provider.clone()))?;
-
     // Adapter la requête : remplacer le model par le model réel du provider.
     let model_alias = body.model.clone();
-    let mut request = body;
-    request.model = alias.model.clone();
-
-    let is_stream = request.stream == Some(true);
+    let is_stream = body.stream == Some(true);
     let start = Instant::now();
 
-    let result: Result<Response, ApiError> = if is_stream {
-        // Mode streaming : forward SSE passthrough.
-        let chunk_stream = provider.stream(request).await?;
+    // Dispatch avec fallback : tente le primary, puis le fallback si configuré.
+    // Le fallback est tenté dans deux cas :
+    //   1. Circuit breaker du primary est ouvert
+    //   2. Appel au primary retourne ApiError::Backend (réseau, timeout, 5xx)
+    // Les erreurs non-backend (alias inconnu, provider absent) ne déclenchent pas le fallback.
+    let (result, effective_provider) =
+        dispatch_with_fallback(&state, body, &alias, is_stream).await;
 
-        // Convertit le stream de ChatCompletionChunk en stream de bytes SSE.
-        // CB-1 : le circuit breaker est alimenté par les erreurs mid-stream via record_failure.
+    let latency = start.elapsed();
+
+    // Enregistrement circuit breaker selon le résultat de l'appel — sur le provider effectif.
+    match &result {
+        Ok(_) => state
+            .providers
+            .circuit_breakers
+            .record_success(&effective_provider),
+        Err(ApiError::Backend(llm_err)) => {
+            state
+                .providers
+                .circuit_breakers
+                .record_failure(&effective_provider, llm_err);
+        }
+        Err(_) => {
+            // Erreur non-backend (alias inconnu, provider absent) — pas d'impact circuit breaker.
+        }
+    }
+
+    // Journalisation et métriques — non-bloquants, fire and forget.
+    let status_code = match &result {
+        Ok(resp) => resp.status().as_u16(),
+        Err(e) => e.status_code(),
+    };
+
+    // Métriques synchrones (atomiques, pas de I/O).
+    state.metrics.record_request(
+        "/v1/chat/completions",
+        &model_alias,
+        &effective_provider,
+        status_code,
+        Some(latency),
+    );
+
+    // Journal asynchrone SQLite — fire and forget.
+    let registry = state.registry.clone();
+    let alias_name = model_alias.clone();
+    let real_model = alias.model.clone();
+    let error_msg = result.as_ref().err().map(|e| e.to_string());
+
+    tokio::spawn(async move {
+        let entry = RequestLogEntry {
+            model_alias: alias_name,
+            provider_real: effective_provider,
+            real_model,
+            route: "/v1/chat/completions".to_owned(),
+            latency_ms: Some(latency.as_millis() as u64),
+            status_code,
+            streamed: is_stream,
+            error_message: error_msg,
+        };
+        if let Err(e) = registry.log_request(entry).await {
+            tracing::warn!("erreur journalisation requête chat: {}", e);
+        }
+    });
+
+    result
+}
+
+/// Dispatch une requête chat vers le primary provider, avec fallback automatique.
+///
+/// Retourne `(résultat, nom_provider_effectif)`.
+/// Le provider effectif est le primary si la requête y aboutit (succès ou erreur non-backend),
+/// ou le fallback si le primary a échoué et qu'un fallback est configuré.
+///
+/// Logique de fallback :
+/// - Circuit breaker primary ouvert → tenter fallback directement (sans appel réseau primary)
+/// - Appel primary échoue avec ApiError::Backend → tenter fallback
+/// - Appel primary échoue avec autre erreur (400, 500 config) → pas de fallback
+async fn dispatch_with_fallback(
+    state: &crate::AppState,
+    body: llm_commons::openai::chat::ChatCompletionRequest,
+    alias: &crate::config::AliasTarget,
+    is_stream: bool,
+) -> (Result<Response, ApiError>, String) {
+    // Tentative sur le primary provider.
+    let primary_result = try_provider(
+        state,
+        body.clone(),
+        &alias.provider,
+        &alias.model,
+        is_stream,
+    )
+    .await;
+
+    match primary_result {
+        // Succès primary — retourner directement.
+        Ok(resp) => (Ok(resp), alias.provider.clone()),
+
+        // Erreur non-backend (config) — pas de fallback, retourner l'erreur.
+        Err(ref e) if !is_backend_error(e) => (primary_result, alias.provider.clone()),
+
+        // Erreur backend — tenter le fallback si configuré.
+        Err(primary_err) => {
+            // Alimenter le circuit breaker du primary même quand le fallback récupère.
+            // Raison : si le primary est down, son CB doit s'ouvrir pour éviter des
+            // tentatives réseau coûteuses sur les requêtes suivantes.
+            if let ApiError::Backend(ref llm_err) = primary_err {
+                state
+                    .providers
+                    .circuit_breakers
+                    .record_failure(&alias.provider, llm_err);
+            }
+
+            let Some(fb_provider) = &alias.fallback_provider else {
+                // Pas de fallback configuré — retourner l'erreur primary.
+                return (Err(primary_err), alias.provider.clone());
+            };
+
+            tracing::warn!(
+                primary = %alias.provider,
+                fallback = %fb_provider,
+                error = %primary_err,
+                "primary provider échoué — tentative fallback"
+            );
+
+            // Model fallback : utiliser fallback_model si défini, sinon le même model.
+            let fb_model = alias.fallback_model.as_deref().unwrap_or(&alias.model);
+            let fb_result = try_provider(state, body, fb_provider, fb_model, is_stream).await;
+
+            match fb_result {
+                Ok(resp) => {
+                    tracing::info!(
+                        fallback = %fb_provider,
+                        "fallback provider OK"
+                    );
+                    // Provider effectif = fallback (succès). Le CB du fallback sera alimenté
+                    // avec record_success dans le handler principal.
+                    (Ok(resp), fb_provider.clone())
+                }
+                Err(fb_err) => {
+                    tracing::warn!(
+                        fallback = %fb_provider,
+                        error = %fb_err,
+                        "fallback provider également échoué"
+                    );
+                    // Retourner l'erreur du fallback (plus récente) avec le nom du fallback.
+                    // Le CB du fallback sera alimenté avec record_failure dans le handler principal.
+                    (Err(fb_err), fb_provider.clone())
+                }
+            }
+        }
+    }
+}
+
+/// Retourne `true` si l'erreur est une erreur backend (réseau, timeout, upstream 5xx)
+/// qui justifie de tenter un fallback.
+/// Les erreurs de configuration (alias inconnu, provider absent) ne déclenchent pas le fallback.
+fn is_backend_error(e: &ApiError) -> bool {
+    matches!(e, ApiError::Backend(_))
+}
+
+/// Tente un appel vers un provider spécifique (primary ou fallback).
+///
+/// Vérifie le circuit breaker, résout le provider depuis le pool, et dispatch
+/// selon le mode streaming ou non-streaming.
+/// Retourne une `ApiError::Backend` si le circuit breaker est ouvert
+/// (traité comme erreur backend pour déclencher le fallback).
+async fn try_provider(
+    state: &crate::AppState,
+    mut body: llm_commons::openai::chat::ChatCompletionRequest,
+    provider_name: &str,
+    model: &str,
+    is_stream: bool,
+) -> Result<Response, ApiError> {
+    // Circuit breaker : traiter l'ouverture comme une erreur backend (déclencheur fallback).
+    if !state.providers.circuit_breakers.should_allow(provider_name) {
+        tracing::warn!(
+            provider = %provider_name,
+            "circuit breaker ouvert — traité comme erreur backend pour fallback"
+        );
+        return Err(ApiError::Backend(
+            llm_commons::error::LlmError::ProviderUnavailable {
+                provider: provider_name.to_string(),
+                reason: "circuit breaker ouvert".to_string(),
+            },
+        ));
+    }
+
+    // Résolution du provider depuis le pool partagé.
+    let provider = state
+        .providers
+        .get(provider_name)
+        .ok_or_else(|| ApiError::ProviderNotFound(provider_name.to_string()))?;
+
+    // Injecter le model réel du provider.
+    body.model = model.to_string();
+
+    if is_stream {
+        let chunk_stream = provider.stream(body).await?;
         let circuit_breakers = state.providers.circuit_breakers.clone();
-        let provider_id_for_stream = alias.provider.clone();
-        let sse_body =
-            sse_stream_from_chunks(chunk_stream, circuit_breakers, provider_id_for_stream);
+        let provider_id = provider_name.to_string();
+        let sse_body = sse_stream_from_chunks(chunk_stream, circuit_breakers, provider_id);
 
         let response = Response::builder()
             .status(StatusCode::OK)
@@ -140,69 +306,9 @@ pub async fn handler(
 
         Ok(response)
     } else {
-        // Mode non-streaming : réponse JSON complète.
-        let completion = provider.complete(request).await?;
+        let completion = provider.complete(body).await?;
         Ok((StatusCode::OK, Json(completion)).into_response())
-    };
-
-    let latency = start.elapsed();
-
-    // Enregistrement circuit breaker selon le résultat de l'appel.
-    match &result {
-        Ok(_) => state
-            .providers
-            .circuit_breakers
-            .record_success(&alias.provider),
-        Err(ApiError::Backend(llm_err)) => {
-            state
-                .providers
-                .circuit_breakers
-                .record_failure(&alias.provider, llm_err);
-        }
-        Err(_) => {
-            // Erreur non-backend (alias inconnu, provider absent) — pas d'impact circuit breaker.
-        }
     }
-
-    // Journalisation et métriques — non-bloquants, fire and forget.
-    let status_code = match &result {
-        Ok(resp) => resp.status().as_u16(),
-        Err(e) => e.status_code(),
-    };
-
-    // Métriques synchrones (atomiques, pas de I/O).
-    state.metrics.record_request(
-        "/v1/chat/completions",
-        &model_alias,
-        &alias.provider,
-        status_code,
-        Some(latency),
-    );
-
-    // Journal asynchrone SQLite — fire and forget.
-    let registry = state.registry.clone();
-    let alias_name = model_alias.clone();
-    let provider_name = alias.provider.clone();
-    let real_model = alias.model.clone();
-    let error_msg = result.as_ref().err().map(|e| e.to_string());
-
-    tokio::spawn(async move {
-        let entry = RequestLogEntry {
-            model_alias: alias_name,
-            provider_real: provider_name,
-            real_model,
-            route: "/v1/chat/completions".to_owned(),
-            latency_ms: Some(latency.as_millis() as u64),
-            status_code,
-            streamed: is_stream,
-            error_message: error_msg,
-        };
-        if let Err(e) = registry.log_request(entry).await {
-            tracing::warn!("erreur journalisation requête chat: {}", e);
-        }
-    });
-
-    result
 }
 
 /// Convertit un stream de `LlmResult<ChatCompletionChunk>` en stream de bytes SSE.

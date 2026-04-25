@@ -46,10 +46,7 @@ fn test_config_for_mock(mock_addr: SocketAddr) -> llm_free_gateway_v2::config::C
     let mut aliases = HashMap::new();
     aliases.insert(
         "test-model".to_string(),
-        AliasTarget {
-            provider: "mock-llmcore".to_string(),
-            model: "test-model-real".to_string(),
-        },
+        AliasTarget::simple("mock-llmcore", "test-model-real"),
     );
 
     Config {
