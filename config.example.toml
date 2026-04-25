@@ -22,6 +22,14 @@ circuit_threshold = 5
 circuit_window_secs = 60
 circuit_cooldown_secs = 30
 
+# Cap hard total de tokens par requête chat (input + max_tokens demandé).
+# Si le total estimé dépasse ce seuil → HTTP 413 context_length_exceeded.
+# Motivation C4 : Qwen3.6 slot ctx réel = 262K (YARN), bug freeze llama-server
+# sur cache-bf16 + corpus >200K → cap conservateur à 180K.
+# 0 = désactivé (non recommandé en prod Qwen3.6).
+# Surridable via env var MAX_TOTAL_TOKENS sans redéploiement config.
+max_total_tokens = 180000
+
 [logging]
 level = "info"
 

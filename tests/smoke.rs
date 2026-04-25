@@ -41,6 +41,7 @@ fn test_config() -> llm_free_gateway_v2::config::Config {
             circuit_threshold: 5,
             circuit_window_secs: 60,
             circuit_cooldown_secs: 30,
+            max_total_tokens: 0, // désactivé dans les tests généraux
         },
         logging: LoggingConfig {
             level: "error".to_string(),
@@ -313,6 +314,7 @@ fn build_auth_test_server(token: &str) -> TestServer {
             circuit_threshold: 5,
             circuit_window_secs: 60,
             circuit_cooldown_secs: 30,
+            max_total_tokens: 0, // désactivé dans les tests
         },
         logging: LoggingConfig {
             level: "error".to_string(),
@@ -414,6 +416,7 @@ fn build_rate_limited_server() -> TestServer {
             circuit_threshold: 5,
             circuit_window_secs: 60,
             circuit_cooldown_secs: 30,
+            max_total_tokens: 0, // désactivé dans les tests
         },
         logging: LoggingConfig {
             level: "error".to_string(),

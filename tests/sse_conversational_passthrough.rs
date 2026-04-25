@@ -66,6 +66,7 @@ fn test_config_for_mock(mock_addr: SocketAddr) -> llm_free_gateway_v2::config::C
             circuit_threshold: 5,
             circuit_window_secs: 60,
             circuit_cooldown_secs: 30,
+            max_total_tokens: 0, // désactivé dans les tests
         },
         logging: LoggingConfig {
             level: "error".to_string(),
@@ -589,8 +590,8 @@ async fn sse_tcp_fragmented_buffering() {
     for line in body.lines() {
         if let Some(data) = line.strip_prefix("data: ") {
             if data != "[DONE]" {
-                let _: serde_json::Value =
-                    serde_json::from_str(data).expect(&format!("chunk valide JSON: {data}"));
+                let _: serde_json::Value = serde_json::from_str(data)
+                    .unwrap_or_else(|_| panic!("chunk valide JSON: {data}"));
             }
         }
     }

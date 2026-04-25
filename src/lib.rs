@@ -12,6 +12,7 @@ pub mod provider_pool;
 pub mod providers;
 pub mod rate_limit;
 pub mod registry;
+pub mod token_counter;
 
 use config::Config;
 use metrics::Metrics;

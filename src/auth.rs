@@ -85,6 +85,7 @@ mod tests {
                 circuit_threshold: 5,
                 circuit_window_secs: 60,
                 circuit_cooldown_secs: 30,
+                max_total_tokens: 0, // désactivé dans les tests
             },
             logging: LoggingConfig {
                 level: "error".to_string(),

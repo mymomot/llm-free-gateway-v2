@@ -66,6 +66,19 @@ pub struct ServerConfig {
     /// Défaut : 30s.
     #[serde(default = "default_circuit_cooldown_secs")]
     pub circuit_cooldown_secs: u64,
+    /// Cap hard total de tokens (input + max_tokens demandé) par requête chat.
+    ///
+    /// Si le total estimé dépasse ce seuil, le gateway retourne HTTP 413
+    /// avec code `context_length_exceeded` AVANT d'envoyer la requête au backend.
+    ///
+    /// Motivation : Qwen3.6 slot ctx réel = 262K (YARN), mais bug freeze llama-server
+    /// connu sur cache-bf16 + corpus >200K. Le cap 180K est imposé par le council
+    /// homelab-gouvernance MAJOR 2026-04-25 (condition C4).
+    ///
+    /// Défaut : 180000. Peut être abaissé via `MAX_TOTAL_TOKENS` ou directement
+    /// en TOML. `0` désactive le cap (non recommandé en prod avec Qwen3.6).
+    #[serde(default = "default_max_total_tokens")]
+    pub max_total_tokens: u64,
 }
 
 fn default_rate_limit() -> u32 {
@@ -82,6 +95,14 @@ fn default_circuit_window_secs() -> u64 {
 
 fn default_circuit_cooldown_secs() -> u64 {
     30
+}
+
+/// Cap hard tokens par défaut — council homelab-gouvernance MAJOR 2026-04-25 (C4).
+/// Slot ctx réel Qwen3.6 = 262K, cap 180K pour éviter freeze cache-bf16 >200K.
+fn default_max_total_tokens() -> u64 {
+    // Surridable via variable d'env MAX_TOTAL_TOKENS au chargement de config.
+    // La lecture de l'env est gérée dans `Config::load` après parsing TOML.
+    180_000
 }
 
 /// Config logging.
@@ -177,12 +198,35 @@ impl Config {
     ///
     /// Retourne `Err` avec message précis si le fichier est absent ou malformé.
     /// Le binaire doit traiter cette erreur comme fatale (exit non-zero).
+    ///
+    /// Override possible par variable d'environnement après parsing TOML :
+    /// - `MAX_TOTAL_TOKENS` : surride `server.max_total_tokens` (u64, 0 = désactivé)
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!("impossible de lire le fichier config '{}': {}", path, e)
         })?;
-        let config: Config = toml::from_str(&content)
+        let mut config: Config = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("config TOML invalide dans '{}': {}", path, e))?;
+
+        // Override MAX_TOTAL_TOKENS depuis env var (C4 — surridable sans redéploiement config).
+        if let Ok(val) = std::env::var("MAX_TOTAL_TOKENS") {
+            match val.parse::<u64>() {
+                Ok(n) => {
+                    tracing::info!(
+                        max_total_tokens = n,
+                        "cap tokens surchargé via MAX_TOTAL_TOKENS"
+                    );
+                    config.server.max_total_tokens = n;
+                }
+                Err(_) => {
+                    anyhow::bail!(
+                        "MAX_TOTAL_TOKENS='{}' invalide — doit être un entier positif",
+                        val
+                    );
+                }
+            }
+        }
+
         config.validate()?;
         Ok(config)
     }

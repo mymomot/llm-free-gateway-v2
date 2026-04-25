@@ -175,6 +175,7 @@ fn config_with_fallback(primary_addr: SocketAddr, fallback_addr: SocketAddr) -> 
             circuit_threshold: 5,
             circuit_window_secs: 60,
             circuit_cooldown_secs: 30,
+            max_total_tokens: 0, // désactivé dans les tests
         },
         logging: LoggingConfig {
             level: "error".to_string(),
@@ -457,6 +458,7 @@ async fn test_no_fallback_primary_down_returns_502() {
             circuit_threshold: 5,
             circuit_window_secs: 60,
             circuit_cooldown_secs: 30,
+            max_total_tokens: 0, // désactivé dans les tests
         },
         logging: LoggingConfig {
             level: "error".to_string(),
@@ -532,6 +534,7 @@ async fn test_primary_cb_incremented_when_fallback_succeeds() {
             circuit_threshold: 1,
             circuit_window_secs: 60,
             circuit_cooldown_secs: 30,
+            max_total_tokens: 0, // désactivé dans les tests
         },
         logging: LoggingConfig {
             level: "error".to_string(),

@@ -22,6 +22,7 @@
 //!
 //! Codes d'erreur :
 //! - 400 : model inconnu (pas dans aliases)
+//! - 413 : dépassement cap tokens (input + max_tokens > server.max_total_tokens)
 //! - 429 : rate limit dépassé
 //! - 500 : provider absent de config (incohérence — normalement catchée à la validation)
 //! - 502 : erreur backend (timeout, réseau, upstream 5xx) — tous fallbacks épuisés
@@ -40,7 +41,10 @@ use axum::{
 use llm_commons::{circuit_breaker::CircuitBreakerRegistry, openai::chat::ChatCompletionRequest};
 use tracing::instrument;
 
-use crate::{error::ApiError, rate_limit::extract_client_ip, registry::RequestLogEntry, AppState};
+use crate::{
+    error::ApiError, rate_limit::extract_client_ip, registry::RequestLogEntry,
+    token_counter::estimate_total_tokens, AppState,
+};
 
 /// Handler POST /v1/chat/completions
 ///
@@ -72,6 +76,24 @@ pub async fn handler(
     }
 
     tracing::Span::current().record("model", body.model.as_str());
+
+    // Cap hard tokens (C4 — council homelab-gouvernance MAJOR 2026-04-25).
+    // Vérification AVANT la résolution d'alias et tout appel réseau.
+    // `max_total_tokens == 0` désactive le cap (non recommandé en prod Qwen3.6).
+    let cap = state.config.server.max_total_tokens;
+    if cap > 0 {
+        let total = estimate_total_tokens(&body);
+        if total > cap {
+            tracing::warn!(
+                consumer = %client_ip,
+                total_tokens = total,
+                cap = cap,
+                model = %body.model,
+                "cap tokens dépassé — requête rejetée HTTP 413"
+            );
+            return Err(ApiError::ContextLengthExceeded { total, cap });
+        }
+    }
 
     // Résolution de l'alias : cherche d'abord le model exact, puis "default".
     let alias = state

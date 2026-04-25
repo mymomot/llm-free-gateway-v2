@@ -37,6 +37,19 @@ pub enum ApiError {
     /// Erreur de désérialisation du body de requête.
     #[error("invalid request body: {0}")]
     InvalidBody(String),
+
+    /// Dépassement du cap total de tokens (input + max_tokens > seuil configuré).
+    ///
+    /// HTTP 413 — imposé par le council homelab-gouvernance MAJOR 2026-04-25 (C4).
+    /// Raison : Qwen3.6 slot ctx réel = 262K mais bug freeze llama-server
+    /// sur cache-bf16 + corpus >200K → cap hard à 180K.
+    #[error("context length exceeded: {total} tokens > cap {cap}")]
+    ContextLengthExceeded {
+        /// Total estimé (input + max_tokens).
+        total: u64,
+        /// Cap configuré.
+        cap: u64,
+    },
 }
 
 /// Corps d'erreur au format OpenAI-compat.
@@ -63,6 +76,7 @@ impl ApiError {
             ApiError::UnknownModel(_) => 400,
             ApiError::ProviderNotFound(_) => 500,
             ApiError::InvalidBody(_) => 400,
+            ApiError::ContextLengthExceeded { .. } => 413,
             ApiError::Backend(llm_err) => match llm_err {
                 LlmError::InvalidRequest { .. } => 400,
                 LlmError::Unauthorized { .. } => 401,
@@ -114,6 +128,17 @@ impl IntoResponse for ApiError {
                 "invalid_request_error",
                 "invalid_body",
                 msg.clone(),
+            ),
+            ApiError::ContextLengthExceeded { total, cap } => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request_error",
+                "context_length_exceeded",
+                format!(
+                    "Input + max_tokens exceeds {} token cap \
+                     (Qwen3.6 slot 262K, hard cap to avoid freeze on cache-bf16 + corpus >200K). \
+                     Estimated total: {} tokens.",
+                    cap, total
+                ),
             ),
         };
 
