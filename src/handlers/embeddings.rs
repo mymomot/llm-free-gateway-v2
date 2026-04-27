@@ -72,21 +72,25 @@ pub async fn handler(
     // Résolution stricte de l'alias — rejet HTTP 404 si absent du config TOML.
     // Pas de fallback silencieux : un embedding vers le mauvais modèle produit des
     // vecteurs incompatibles. Fix Phase D 2026-04-25 — cohérence avec chat handler.
-    let alias = state.config.aliases.get(model).ok_or_else(|| {
-        let mut available: Vec<String> = state.config.aliases.keys().cloned().collect();
-        available.sort();
-        tracing::warn!(
-            consumer = %client_ip,
-            model = %model,
-            available = ?available,
-            "alias inconnu (embeddings) — requête rejetée HTTP 404"
-        );
-        ApiError::AliasNotFound {
-            alias: model_alias_owned.clone(),
-            available,
-        }
-    })?
-    .clone();
+    let alias = state
+        .config
+        .aliases
+        .get(model)
+        .ok_or_else(|| {
+            let mut available: Vec<String> = state.config.aliases.keys().cloned().collect();
+            available.sort();
+            tracing::warn!(
+                consumer = %client_ip,
+                model = %model,
+                available = ?available,
+                "alias inconnu (embeddings) — requête rejetée HTTP 404"
+            );
+            ApiError::AliasNotFound {
+                alias: model_alias_owned.clone(),
+                available,
+            }
+        })?
+        .clone();
 
     // Récupération du provider config.
     let provider_cfg = state

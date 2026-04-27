@@ -368,8 +368,7 @@ mod tests {
         assert_eq!(provider.timeout_secs, 600);
         // Vérifier aussi la conversion f64 sans perte (utilisée dans LlmError::Timeout)
         assert_eq!(
-            provider.timeout_secs as f64,
-            600.0_f64,
+            provider.timeout_secs as f64, 600.0_f64,
             "conversion u64→f64 sans perte pour elapsed_secs"
         );
     }

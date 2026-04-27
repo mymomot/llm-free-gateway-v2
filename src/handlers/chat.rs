@@ -99,21 +99,25 @@ pub async fn handler(
     // Un alias absent du config TOML retourne HTTP 404 avec la liste des aliases disponibles.
     // Raison : le fallback silencieux masquait les consumers sur des aliases legacy supprimés
     // (ex: qwen3.5-122b → forwardé sur default au lieu d'être rejeté). Fix Phase D 2026-04-25.
-    let alias = state.config.aliases.get(&body.model).ok_or_else(|| {
-        let mut available: Vec<String> = state.config.aliases.keys().cloned().collect();
-        available.sort();
-        tracing::warn!(
-            consumer = %client_ip,
-            model = %body.model,
-            available = ?available,
-            "alias inconnu — requête rejetée HTTP 404"
-        );
-        ApiError::AliasNotFound {
-            alias: body.model.clone(),
-            available,
-        }
-    })?
-    .clone();
+    let alias = state
+        .config
+        .aliases
+        .get(&body.model)
+        .ok_or_else(|| {
+            let mut available: Vec<String> = state.config.aliases.keys().cloned().collect();
+            available.sort();
+            tracing::warn!(
+                consumer = %client_ip,
+                model = %body.model,
+                available = ?available,
+                "alias inconnu — requête rejetée HTTP 404"
+            );
+            ApiError::AliasNotFound {
+                alias: body.model.clone(),
+                available,
+            }
+        })?
+        .clone();
 
     // Adapter la requête : remplacer le model par le model réel du provider.
     let model_alias = body.model.clone();

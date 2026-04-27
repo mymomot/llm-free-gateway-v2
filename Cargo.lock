@@ -324,7 +324,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -941,9 +941,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llm-commons"
-version = "0.5.0-alpha.5"
+version = "0.5.0"
 source = "sparse+http://192.168.10.99:8450/api/v1/crates/"
-checksum = "e7e71f0cf091d399038818654fc9784cc8bbbefc8f7f69384696949a4749d50c"
+checksum = "65b2ba841051dfa4ea46a6b847b775e585e827cc2c60a424b3581514d31e7098"
 dependencies = [
  "async-trait",
  "axum",
@@ -1448,7 +1448,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1736,7 +1736,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
